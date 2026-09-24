@@ -5,10 +5,12 @@
 // only syncs between tabs in one browser. Good for trying it out locally.
 
 export const firebaseConfig = {
-  apiKey: "PASTE_YOUR_API_KEY",
-  authDomain: "your-project.firebaseapp.com",
-  projectId: "your-project",
-  storageBucket: "your-project.appspot.com",
-  messagingSenderId: "000000000000",
-  appId: "1:000000000000:web:0000000000000000",
+  apiKey: "AIzaSyAs6X2PJ-AdkRqmJWSUZ3XenikJSBcyIAE",
+  authDomain: "interactive-class-question.firebaseapp.com",
+  projectId: "interactive-class-question",
+  storageBucket: "interactive-class-question.firebasestorage.app",
+  messagingSenderId: "829761789175",
+  appId: "1:829761789175:web:9a25428b69bc214c8787f2",
+  measurementId: "G-8C0RM9LD83"
+
 };
