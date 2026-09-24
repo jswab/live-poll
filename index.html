@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Answer</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📍</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap">
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="app/style.css">
+  <script src="vendor/leaflet/leaflet.js"></script>
+</head>
+<body>
+  <p class="demo-note" id="demoNote" hidden>Demo mode: this page only syncs with other tabs in this browser.</p>
+  <main class="student" id="app" aria-live="polite">
+    <div class="waiting"><h1><span class="pulse"></span>Connecting</h1></div>
+  </main>
+
+  <script type="module">
+    import { connect } from "./app/backend.js";
+
+    const app = document.getElementById("app");
+    const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+    // Answers this phone has sent, so a refresh keeps them selected.
+    const mine = JSON.parse(sessionStorage.getItem("lp-mine") || "{}");
+    const remember = (k, v) => { mine[k] = v; sessionStorage.setItem("lp-mine", JSON.stringify(mine)); };
+
+    let state = null;
+    let key = "";          // runId/questionId currently on screen
+    let map = null;
+    let pin = null;
+    let busy = false;
+
+    const SENT = {
+      choice: "Sent. Tap another option to change your answer.",
+      text: "Sent. Send again to change your answer.",
+      pin: "Sent. Tap the map and send again to move your pin.",
+    };
+
+    function fatal(msg) {
+      app.innerHTML = `<div class="waiting"><h1>Can't connect</h1><p>${esc(msg)}</p></div>`;
+    }
+
+    let be;
+    try {
+      be = await connect();
+      if (be.mode === "demo") document.getElementById("demoNote").hidden = false;
+      await be.signInStudent();
+    } catch (e) {
+      fatal(`Check your connection and reload the page. (${e.code || e.message})`);
+      throw e;
+    }
+
+    be.watchState(
+      (s) => { state = s; render(); },
+      (e) => fatal(`Reload the page to try again. (${e.code || e.message})`),
+    );
+
+    function render() {
+      const q = state?.question;
+      if (!q) {
+        key = "";
+        teardownMap();
+        app.innerHTML = `<div class="waiting">
+          <h1><span class="pulse"></span>You're in</h1>
+          <p>Questions will appear here when your instructor starts.</p></div>`;
+        return;
+      }
+      const k = `${state.runId}/${q.id}`;
+      if (k !== key) { key = k; build(q); }
+      syncOpen();
+    }
+
+    function build(q) {
+      teardownMap();
+      const head = state.total > 1 ? `Question ${state.q + 1} of ${state.total}` : "";
+      let body = "";
+      if (q.type === "choice") {
+        body = `<div class="options" role="group" aria-label="Options">${(q.options || []).map((o) =>
+          `<button class="opt" type="button" data-v="${esc(o)}" aria-pressed="${mine[key] === o}">
+             <span class="mark" aria-hidden="true"></span><span>${esc(o)}</span></button>`).join("")}</div>`;
+      } else if (q.type === "text") {
+        body = `<form class="text-row" id="textForm">
+          <input class="text-in" id="textIn" maxlength="40" autocomplete="off" autocapitalize="off"
+                 enterkeyhint="send" aria-label="Your answer" placeholder="Type your answer"
+                 value="${esc(typeof mine[key] === "string" ? mine[key] : "")}">
+          <button class="btn" type="submit">Send</button></form>`;
+      } else if (q.type === "pin") {
+        body = `<div class="s-map" id="sMap" aria-label="Map. Tap to place your pin."></div>
+          <div class="s-map-actions"><button class="btn" id="pinSend" type="button" disabled>Send location</button></div>`;
+      }
+      app.innerHTML = `
+        ${head ? `<p class="s-head">${head}</p>` : ""}
+        <h1 class="s-prompt">${esc(q.prompt)}</h1>
+        ${body}
+        <p class="status" id="status"></p>`;
+
+      if (q.type === "choice") {
+        app.querySelectorAll(".opt").forEach((b) => b.addEventListener("click", async () => {
+          const v = b.dataset.v;
+          if (await send(v)) {
+            app.querySelectorAll(".opt").forEach((x) => x.setAttribute("aria-pressed", x === b));
+          }
+        }));
+      } else if (q.type === "text") {
+        app.querySelector("#textForm").addEventListener("submit", async (ev) => {
+          ev.preventDefault();
+          const input = app.querySelector("#textIn");
+          const v = input.value.trim().replace(/\s+/g, " ");
+          if (!v) { input.focus(); return; }
+          if (await send(v)) input.blur();
+        });
+      } else if (q.type === "pin") {
+        buildMap(q);
+      }
+    }
+
+    function buildMap(q) {
+      map = L.map("sMap", { worldCopyJump: true, zoomControl: true })
+        .setView(q.center || [20, 0], q.zoom ?? 2);
+      L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+        subdomains: "abcd", maxZoom: 19,
+        attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+      }).addTo(map);
+      const place = (latlng) => {
+        if (pin) pin.setLatLng(latlng);
+        else pin = L.circleMarker(latlng, { radius: 10, color: "#fff", weight: 3,
+          fillColor: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(),
+          fillOpacity: 1 }).addTo(map);
+      };
+      const saved = mine[key];
+      if (saved && typeof saved === "object") place([saved.lat, saved.lng]);
+      const sendBtn = app.querySelector("#pinSend");
+      map.on("click", (e) => {
+        if (!state.open) return;
+        place(e.latlng);
+        sendBtn.disabled = false;
+      });
+      sendBtn.addEventListener("click", async () => {
+        if (!pin) return;
+        const ll = pin.getLatLng().wrap();
+        const v = { lat: +ll.lat.toFixed(4), lng: +ll.lng.toFixed(4) };
+        if (await send(v)) sendBtn.disabled = true;
+      });
+    }
+
+    function teardownMap() {
+      if (map) { map.remove(); map = null; }
+      pin = null;
+    }
+
+    async function send(answer) {
+      if (busy || !state?.open) return false;
+      busy = true;
+      setStatus("Sending…");
+      const k = key;
+      try {
+        await be.submit(state.runId, state.question.id, answer);
+        if (k !== key) return false;          // question changed mid-send
+        remember(k, answer);
+        setStatus(SENT[state.question.type], "ok");
+        return true;
+      } catch (e) {
+        setStatus(e.code === "permission-denied"
+          ? "Responses are closed for this question."
+          : "Your answer didn't go through. Check your connection and try again.", "warn");
+        return false;
+      } finally {
+        busy = false;
+      }
+    }
+
+    function setStatus(text, tone = "") {
+      const el = app.querySelector("#status");
+      if (!el) return;
+      el.textContent = text;
+      el.className = "status" + (tone ? " " + tone : "");
+    }
+
+    function syncOpen() {
+      const open = !!state.open;
+      app.querySelectorAll(".opt, .text-in, #textForm .btn").forEach((el) => { el.disabled = !open; });
+      const pinBtn = app.querySelector("#pinSend");
+      if (pinBtn && !open) pinBtn.disabled = true;
+      if (!open) setStatus("Responses are closed for this question.", "warn");
+      else if (mine[key] !== undefined) setStatus(SENT[state.question.type], "ok");
+      else setStatus("");
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Present</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📍</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap">
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="app/style.css">
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script src="vendor/qrcode.js"></script>
+</head>
+<body>
+  <p class="demo-note" id="demoNote" hidden>
+    Demo mode: open this folder's main page in another tab of this browser to answer as a student.
+    Add your Firebase settings to connect phones.
+  </p>
+
+  <div class="present">
+    <aside class="side">
+      <p class="side-title" id="title"></p>
+      <button class="qr" id="qr" type="button" title="Show QR code full screen (Q)"></button>
+      <p class="join-url" id="joinUrl"></p>
+      <p class="join-hint">Scan the code or type the address to answer.</p>
+
+      <div id="liveInfo" hidden>
+        <div class="live" id="live"><span class="dot"></span><span id="liveText"></span></div>
+        <p class="count" id="count"></p>
+      </div>
+
+      <div class="controls" id="controls" hidden>
+        <button class="btn secondary" id="prev" type="button">Previous</button>
+        <button class="btn" id="next" type="button">Next</button>
+        <button class="btn secondary" id="openBtn" type="button"></button>
+        <button class="btn secondary" id="resultsBtn" type="button"></button>
+        <button class="link wide" id="fresh" type="button">Start fresh</button>
+      </div>
+      <p class="keys" id="keys" hidden>
+        <kbd>←</kbd> <kbd>→</kbd> or a clicker to move<br>
+        <kbd>O</kbd> close/reopen <kbd>R</kbd> results <kbd>Q</kbd> big QR
+      </p>
+    </aside>
+
+    <main class="main" id="main">
+      <p class="qnum" id="qnum"></p>
+      <h1 class="p-prompt" id="prompt"></h1>
+      <div id="results"></div>
+      <div class="p-map" id="pMap" hidden></div>
+      <p class="veil" id="veil" hidden>Results are hidden. Press R to show them.</p>
+    </main>
+  </div>
+
+  <div class="qr-overlay" id="qrOverlay" hidden>
+    <div class="big" id="qrBig"></div>
+    <p id="qrBigUrl"></p>
+  </div>
+  <div class="toast" id="toast" role="alert" hidden></div>
+
+  <script type="module">
+    import { activity } from "./activity.js";
+    import { connect } from "./app/backend.js";
+
+    const $ = (id) => document.getElementById(id);
+    const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+    const N = activity.questions.length;
+    const accent = () => getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+
+    // Join link + QR -------------------------------------------------
+    const joinUrl = new URL("./", location.href).href;
+    const shortUrl = joinUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
+    $("title").textContent = activity.title;
+    document.title = `${activity.title} (presenting)`;
+    $("joinUrl").textContent = shortUrl;
+    $("qrBigUrl").textContent = shortUrl;
+    const qr = qrcode(0, "M");
+    qr.addData(joinUrl);
+    qr.make();
+    const svg = qr.createSvgTag({ cellSize: 8, margin: 2, scalable: true, alt: `QR code for ${shortUrl}` });
+    $("qr").innerHTML = svg;
+    $("qrBig").innerHTML = svg;
+
+    // State ----------------------------------------------------------
+    let be;
+    let state = null;
+    let answers = [];
+    let showResults = true;
+    let stopAnswers = null;
+    let answersKey = "";
+    let resumeAsked = false;
+    let map = null;
+    let pinLayer = null;
+    const hiddenWords = new Map();   // question key -> Set of words hidden by the instructor
+
+    try {
+      be = await connect();
+    } catch (e) {
+      showStart("Can't reach Firebase", `Check firebase-config.js and your connection. (${e.code || e.message})`, []);
+      throw e;
+    }
+    if (be.mode === "demo") $("demoNote").hidden = false;
+
+    if (be.isInstructorSignedIn()) watch();
+    else showSignIn();
+
+    function showSignIn() {
+      showStart(activity.title,
+        "Sign in with the Google account listed in your Firestore rules to run the session.",
+        [{ label: "Sign in with Google", primary: true, run: async () => {
+          try { await be.signInInstructor(); watch(); }
+          catch (e) { toast(`Sign-in didn't finish. (${e.code || e.message})`); }
+        } }]);
+    }
+
+    function watch() {
+      be.watchState((s) => { state = s; onState(); }, fail);
+    }
+
+    function currentIndex() {
+      return state?.question ? activity.questions.findIndex((q) => q.id === state.question.id) : -1;
+    }
+
+    function onState() {
+      const idx = currentIndex();
+      if (!state || idx === -1) {
+        detachAnswers();
+        const count = `${N} question${N === 1 ? "" : "s"}`;
+        showStart(activity.title,
+          state ? `The live session doesn't match activity.js anymore. Start fresh to use the current ${count}.`
+                : `${count}. Starting opens the first one on students' phones.`,
+          [{ label: "Start session", primary: true, run: startFresh }]);
+        return;
+      }
+      if (!resumeAsked) {
+        // First load with a session already running: resume or reset?
+        resumeAsked = true;
+        showStart("Pick up where you left off?",
+          `A session is already open on question ${idx + 1} of ${N}. Starting fresh clears the results on screen and sends everyone back to question 1.`,
+          [{ label: `Resume at question ${idx + 1}`, primary: true, run: () => onState() },
+           { label: "Start fresh", run: startFresh }]);
+        return;
+      }
+      const k = `${state.runId}/${state.question.id}`;
+      if (k !== answersKey) {
+        detachAnswers();
+        answersKey = k;
+        answers = [];
+        renderQuestion(activity.questions[idx], idx);
+        stopAnswers = be.watchAnswers(state.runId, state.question.id,
+          (a) => { answers = a; renderResults(); }, fail);
+      }
+      renderSide();
+      renderResults();
+    }
+
+    function detachAnswers() {
+      if (stopAnswers) stopAnswers();
+      stopAnswers = null;
+      answersKey = "";
+    }
+
+    // Actions --------------------------------------------------------
+    const questionFor = (i) => {
+      const q = activity.questions[i];
+      return JSON.parse(JSON.stringify({
+        id: q.id, type: q.type, prompt: q.prompt,
+        options: q.options ?? null, center: q.center ?? null, zoom: q.zoom ?? null,
+      }));
+    };
+    async function save(s) {
+      try { await be.setState(s); } catch (e) { fail(e); }
+    }
+    async function startFresh() {
+      resumeAsked = true;
+      await save({ title: activity.title, runId: Date.now().toString(36), q: 0, total: N, open: true, question: questionFor(0) });
+    }
+    async function goTo(i) {
+      if (!state || i < 0 || i >= N) return;
+      await save({ ...state, q: i, total: N, open: true, question: questionFor(i) });
+    }
+    const move = (d) => { const i = currentIndex(); if (i !== -1) goTo(i + d); };
+    const toggleOpen = () => state && save({ ...state, open: !state.open });
+    function toggleResults() { showResults = !showResults; renderSide(); renderResults(); }
+
+    $("prev").onclick = () => move(-1);
+    $("next").onclick = () => move(1);
+    $("openBtn").onclick = toggleOpen;
+    $("resultsBtn").onclick = toggleResults;
+    $("fresh").onclick = () => {
+      if (confirm("Start fresh? Everyone goes back to question 1 with no answers.")) startFresh();
+    };
+    $("qr").onclick = () => toggleQR(true);
+    $("qrOverlay").onclick = () => toggleQR(false);
+
+    function toggleQR(show) { $("qrOverlay").hidden = !(show ?? $("qrOverlay").hidden); }
+
+    document.addEventListener("keydown", (e) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const k = e.key.toLowerCase();
+      if (k === "escape") return toggleQR(false);
+      if (k === "q") return toggleQR();
+      if (!answersKey) return;
+      if (["arrowright", "pagedown", " "].includes(k)) { e.preventDefault(); move(1); }
+      else if (["arrowleft", "pageup"].includes(k)) { e.preventDefault(); move(-1); }
+      else if (k === "o") toggleOpen();
+      else if (k === "r") toggleResults();
+    });
+
+    // Rendering ------------------------------------------------------
+    function showStart(heading, text, actions) {
+      $("liveInfo").hidden = $("controls").hidden = $("keys").hidden = true;
+      $("pMap").hidden = $("veil").hidden = true;
+      $("qnum").textContent = "";
+      $("prompt").textContent = "";
+      const r = $("results");
+      r.hidden = false;
+      r.innerHTML = `<div class="start"><h1>${esc(heading)}</h1><p>${esc(text)}</p><div class="row"></div></div>`;
+      const row = r.querySelector(".row");
+      actions.forEach((a) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "btn" + (a.primary ? "" : " secondary");
+        b.textContent = a.label;
+        b.onclick = a.run;
+        row.append(b);
+      });
+    }
+
+    function renderQuestion(q, idx) {
+      $("liveInfo").hidden = $("controls").hidden = $("keys").hidden = false;
+      $("qnum").textContent = `Question ${idx + 1} of ${N}`;
+      $("prompt").textContent = q.prompt;
+      const r = $("results");
+      r.innerHTML = "";
+      $("pMap").hidden = q.type !== "pin";
+      if (q.type === "choice") {
+        r.innerHTML = `<div class="bars">${q.options.map((o, i) => `
+          <div class="bar-row">
+            <div class="bar-label">${esc(o)}</div>
+            <div class="bar-track"><div class="bar-fill" id="fill${i}"></div></div>
+            <div class="bar-num" id="num${i}"></div>
+          </div>`).join("")}</div>`;
+      } else if (q.type === "pin") {
+        if (!map) {
+          map = L.map("pMap", { worldCopyJump: true, zoomSnap: 0.5 });
+          L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+            subdomains: "abcd", maxZoom: 19,
+            attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+          }).addTo(map);
+          pinLayer = L.layerGroup().addTo(map);
+        }
+        map.invalidateSize();
+        map.setView(q.center || [20, 0], q.zoom ?? 2);
+      }
+      $("prev").disabled = idx === 0;
+      $("next").disabled = idx === N - 1;
+    }
+
+    function renderSide() {
+      $("live").classList.toggle("open", !!state.open);
+      $("liveText").textContent = state.open ? "Accepting responses" : "Responses closed";
+      $("openBtn").textContent = state.open ? "Close responses" : "Reopen responses";
+      $("resultsBtn").textContent = showResults ? "Hide results" : "Show results";
+    }
+
+    function renderResults() {
+      if (!answersKey) return;
+      const q = activity.questions[currentIndex()];
+      if (!q) return;
+      $("count").textContent = `${answers.length} ${answers.length === 1 ? "response" : "responses"}`;
+      $("veil").hidden = showResults;
+      $("results").hidden = !showResults;
+      if (q.type === "pin") $("pMap").style.visibility = showResults ? "visible" : "hidden";
+      if (!showResults) return;
+      if (q.type === "choice") drawBars(q);
+      else if (q.type === "text") drawCloud();
+      else if (q.type === "pin") drawPins();
+    }
+
+    function drawBars(q) {
+      const counts = q.options.map((o) => answers.filter((a) => a === o).length);
+      const total = answers.length;
+      const max = Math.max(1, ...counts);
+      counts.forEach((c, i) => {
+        $(`fill${i}`).style.width = `${(c / max) * 100}%`;
+        $(`num${i}`).innerHTML = `<b>${c}</b><span>${total ? Math.round((c / total) * 100) : 0}%</span>`;
+      });
+    }
+
+    function drawCloud() {
+      const hidden = hiddenWords.get(answersKey) || new Set();
+      const tally = new Map();
+      for (const a of answers) {
+        if (typeof a !== "string") continue;
+        const w = a.toLowerCase().trim().replace(/[.,!?;:"]+$/g, "").replace(/\s+/g, " ");
+        if (w && !hidden.has(w)) tally.set(w, (tally.get(w) || 0) + 1);
+      }
+      const words = [...tally].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 80);
+      const r = $("results");
+      if (!words.length) {
+        r.innerHTML = `<p class="empty">Answers will appear here as they come in.</p>`;
+        return;
+      }
+      const max = words[0][1];
+      r.innerHTML = `<div class="cloud">${words.map(([w, c]) => {
+        const size = 1.3 + 3.9 * Math.sqrt(c / max);
+        return `<button type="button" data-w="${esc(w)}" class="${c === max ? "top" : ""}"
+                  style="font-size:${size.toFixed(2)}rem" title="${c} ${c === 1 ? "response" : "responses"}. Click to hide.">${esc(w)}</button>`;
+      }).join("")}</div>
+      <p class="cloud-hint">Bigger words were typed more often. Click a word to hide it from the screen.</p>`;
+      r.querySelectorAll(".cloud button").forEach((b) => b.addEventListener("click", () => {
+        if (!hiddenWords.has(answersKey)) hiddenWords.set(answersKey, new Set());
+        hiddenWords.get(answersKey).add(b.dataset.w);
+        drawCloud();
+      }));
+    }
+
+    function drawPins() {
+      pinLayer.clearLayers();
+      const fill = accent();
+      for (const a of answers) {
+        if (!a || typeof a !== "object" || !isFinite(a.lat) || !isFinite(a.lng)) continue;
+        L.circleMarker([a.lat, a.lng], {
+          radius: 8, color: "#fff", weight: 2, fillColor: fill, fillOpacity: 0.75,
+        }).addTo(pinLayer);
+      }
+    }
+
+    // Errors ---------------------------------------------------------
+    function fail(e) {
+      const msg = e?.code === "permission-denied"
+        ? "Firestore refused the change. Check that your Google account's email is the one in firestore.rules."
+        : `Something went wrong: ${e?.code || e?.message || e}`;
+      toast(msg);
+      console.error(e);
+    }
+    let toastTimer;
+    function toast(msg) {
+      const t = $("toast");
+      t.textContent = msg;
+      t.hidden = false;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { t.hidden = true; }, 7000);
+    }
+  </script>
+</body>
+</html>

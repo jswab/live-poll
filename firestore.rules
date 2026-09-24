@@ -1,0 +1,47 @@
+rules_version = '2';
+
+// Paste this into Firebase console > Firestore Database > Rules, then Publish.
+// Replace the email below with the Google account you'll sign in with on present.html.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isInstructor() {
+      return request.auth != null
+        && request.auth.token.email == "YOUR_GOOGLE_EMAIL@gmail.com"
+        && request.auth.token.email_verified == true;
+    }
+
+    function live() {
+      return get(/databases/$(database)/documents/live/state).data;
+    }
+
+    function validAnswer(a) {
+      return (a is string && a.size() > 0 && a.size() <= 200)
+        || (a is map && a.keys().hasOnly(['lat', 'lng'])
+            && a.lat is number && a.lng is number);
+    }
+
+    // Current question. Phones read it; only the instructor changes it.
+    match /live/state {
+      allow read: if true;
+      allow write: if isInstructor();
+    }
+
+    // One answer per student per question. Students can only write their own,
+    // only to the question on screen, and only while responses are open.
+    // Only the instructor can read answers.
+    match /runs/{runId}/questions/{qid}/answers/{uid} {
+      allow read: if isInstructor();
+      allow create, update: if request.auth != null
+        && request.auth.uid == uid
+        && live().open == true
+        && live().runId == runId
+        && live().question.id == qid
+        && request.resource.data.keys().hasOnly(['answer', 'ts'])
+        && request.resource.data.ts == request.time
+        && validAnswer(request.resource.data.answer);
+      allow delete: if isInstructor();
+    }
+  }
+}
