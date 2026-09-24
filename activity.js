@@ -8,7 +8,6 @@
 // Every question needs a unique id. Answers are stored under that id, so
 // change the id if you rewrite a question and don't want old answers mixed in.
 
-js
 export const activity = {
   title: "AI check-in",
   questions: [
