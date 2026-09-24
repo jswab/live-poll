@@ -8,26 +8,20 @@
 // Every question needs a unique id. Answers are stored under that id, so
 // change the id if you rewrite a question and don't want old answers mixed in.
 
+js
 export const activity = {
-  title: "Live poll",
+  title: "AI check-in",
   questions: [
     {
-      id: "projection",
+      id: "ai-use",
       type: "choice",
-      prompt: "Which world map projection do you see most often?",
-      options: ["Mercator", "Robinson", "Equal Earth", "Not sure"],
+      prompt: "How often do you use AI tools like ChatGPT, Claude, or Gemini?",
+      options: ["All the time", "Often", "Sometimes", "Rarely", "Never"],
     },
     {
-      id: "trust-word",
+      id: "ai-attitude",
       type: "text",
-      prompt: "In one word: what makes a map trustworthy?",
-    },
-    {
-      id: "hometown",
-      type: "pin",
-      prompt: "Tap the map roughly where you grew up.",
-      center: [38, -96], // [latitude, longitude] the map opens on
-      zoom: 3,
+      prompt: "In one word, how do you feel about AI?",
     },
   ],
 };
