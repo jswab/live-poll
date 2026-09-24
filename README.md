@@ -72,6 +72,10 @@ class; earlier answers stay in Firestore if you want them later.
 Change `activity.js` and upload it to GitHub. GitHub Pages can take a minute or two to update,
 so do this before class, then reload `present.html`. Give each question a unique `id`.
 
+Set `selfPaced: true` at the top of `activity.js` to let students move through all the questions
+on their own phones (with Back and Next buttons). The projector still shows one question's results at a
+time, and you move it forward with Next. Set it to `false` to keep everyone on the projector's question.
+
 ## Good to know
 
 - Free GitHub Pages sites come from public repositories, so anyone who finds the repo can read

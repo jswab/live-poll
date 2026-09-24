@@ -130,7 +130,9 @@
         const count = `${N} question${N === 1 ? "" : "s"}`;
         showStart(activity.title,
           state ? `The live session doesn't match activity.js anymore. Start fresh to use the current ${count}.`
-                : `${count}. Starting opens the first one on students' phones.`,
+                : activity.selfPaced
+                  ? `${count}. Students work through them at their own pace; the screen shows one at a time.`
+                  : `${count}. Starting opens the first one on students' phones.`,
           [{ label: "Start session", primary: true, run: startFresh }]);
         return;
       }
@@ -173,13 +175,20 @@
     async function save(s) {
       try { await be.setState(s); } catch (e) { fail(e); }
     }
+    // In self-paced mode every question goes to the phones up front;
+    // "question" is still the one on the projector.
+    const pacing = () => activity.selfPaced
+      ? { selfPaced: true, ids: activity.questions.map((q) => q.id),
+          questions: activity.questions.map((_, i) => questionFor(i)) }
+      : { selfPaced: false, ids: null, questions: null };
     async function startFresh() {
       resumeAsked = true;
-      await save({ title: activity.title, runId: Date.now().toString(36), q: 0, total: N, open: true, question: questionFor(0) });
+      await save({ title: activity.title, runId: Date.now().toString(36), q: 0, total: N, open: true,
+                   question: questionFor(0), ...pacing() });
     }
     async function goTo(i) {
       if (!state || i < 0 || i >= N) return;
-      await save({ ...state, q: i, total: N, open: true, question: questionFor(i) });
+      await save({ ...state, q: i, total: N, open: true, question: questionFor(i), ...pacing() });
     }
     const move = (d) => { const i = currentIndex(); if (i !== -1) goTo(i + d); };
     const toggleOpen = () => state && save({ ...state, open: !state.open });
@@ -261,7 +270,9 @@
 
     function renderSide() {
       $("live").classList.toggle("open", !!state.open);
-      $("liveText").textContent = state.open ? "Accepting responses" : "Responses closed";
+      $("liveText").textContent = state.open
+        ? (state.selfPaced ? "Accepting responses to all questions" : "Accepting responses")
+        : "Responses closed";
       $("openBtn").textContent = state.open ? "Close responses" : "Reopen responses";
       $("resultsBtn").textContent = showResults ? "Hide results" : "Show results";
     }

@@ -125,7 +125,8 @@ function demoBackend() {
 
     async submit(runId, qid, answer) {
       const s = read("lp-demo-state", null);
-      if (!s || !s.open || s.runId !== runId || s.question?.id !== qid) throw denied();
+      const allowed = s?.question?.id === qid || (s?.selfPaced && (s.ids || []).includes(qid));
+      if (!s || !s.open || s.runId !== runId || !allowed) throw denied();
       write(`${ANS}${runId}/${qid}/${uid}`, answer);
       notify();
     },

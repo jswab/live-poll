@@ -31,9 +31,14 @@
 
     let state = null;
     let key = "";          // runId/questionId currently on screen
+    let shown = null;      // question object currently on screen
     let map = null;
     let pin = null;
     let busy = false;
+
+    // Self-paced mode: where this phone is in the question list.
+    const pos = JSON.parse(sessionStorage.getItem("lp-pos") || "{}");
+    const savePos = () => sessionStorage.setItem("lp-pos", JSON.stringify(pos));
 
     const SENT = {
       choice: "Sent. Tap another option to change your answer.",
@@ -60,10 +65,22 @@
       (e) => fatal(`Reload the page to try again. (${e.code || e.message})`),
     );
 
+    function selfPaced() { return !!state?.selfPaced && Array.isArray(state.questions); }
+
     function render() {
-      const q = state?.question;
+      let q = state?.question;
+      let idx = state?.q ?? 0;
+      let total = state?.total ?? 1;
+      if (state && selfPaced()) {
+        if (pos.runId !== state.runId) { pos.runId = state.runId; pos.idx = 0; savePos(); }
+        total = state.questions.length;
+        idx = Math.min(pos.idx, total);
+        if (idx === total) { showDone(); return; }
+        q = state.questions[idx];
+      }
       if (!q) {
         key = "";
+        shown = null;
         teardownMap();
         app.innerHTML = `<div class="waiting">
           <h1><span class="pulse"></span>You're in</h1>
@@ -71,13 +88,39 @@
         return;
       }
       const k = `${state.runId}/${q.id}`;
-      if (k !== key) { key = k; build(q); }
+      if (k !== key) { key = k; shown = q; build(q, idx, total); }
       syncOpen();
     }
 
-    function build(q) {
+    function go(idx) {
+      pos.idx = idx;
+      savePos();
+      render();
+      window.scrollTo(0, 0);
+    }
+
+    function showDone() {
+      const k = `${state.runId}/done`;
+      if (key === k) return;
+      key = k;
+      shown = null;
       teardownMap();
-      const head = state.total > 1 ? `Question ${state.q + 1} of ${state.total}` : "";
+      app.innerHTML = `<div class="waiting">
+        <h1>All done</h1>
+        <p>Your answers are in. You can go back and change them until your instructor closes responses.</p>
+        <div class="s-nav"><button class="btn secondary" id="review" type="button">Go back</button></div></div>`;
+      app.querySelector("#review").onclick = () => go(state.questions.length - 1);
+    }
+
+    function build(q, idx, total) {
+      teardownMap();
+      const head = total > 1 ? `Question ${idx + 1} of ${total}` : "";
+      const nav = selfPaced()
+        ? `<div class="s-nav">
+             ${idx > 0 ? `<button class="btn secondary" id="back" type="button">Back</button>` : ""}
+             <button class="btn" id="fwd" type="button">${idx === total - 1 ? "Finish" : "Next question"}</button>
+           </div>`
+        : "";
       let body = "";
       if (q.type === "choice") {
         body = `<div class="options" role="group" aria-label="Options">${(q.options || []).map((o) =>
@@ -97,7 +140,14 @@
         ${head ? `<p class="s-head">${head}</p>` : ""}
         <h1 class="s-prompt">${esc(q.prompt)}</h1>
         ${body}
-        <p class="status" id="status"></p>`;
+        <p class="status" id="status"></p>
+        ${nav}`;
+
+      if (nav) {
+        app.querySelector("#fwd").onclick = () => go(idx + 1);
+        const back = app.querySelector("#back");
+        if (back) back.onclick = () => go(idx - 1);
+      }
 
       if (q.type === "choice") {
         app.querySelectorAll(".opt").forEach((b) => b.addEventListener("click", async () => {
@@ -159,10 +209,11 @@
       setStatus("Sending…");
       const k = key;
       try {
-        await be.submit(state.runId, state.question.id, answer);
+        const q = shown;
+        await be.submit(state.runId, q.id, answer);
         if (k !== key) return false;          // question changed mid-send
         remember(k, answer);
-        setStatus(SENT[state.question.type], "ok");
+        setStatus(SENT[q.type], "ok");
         return true;
       } catch (e) {
         setStatus(e.code === "permission-denied"
@@ -182,12 +233,13 @@
     }
 
     function syncOpen() {
+      if (!shown) return;
       const open = !!state.open;
       app.querySelectorAll(".opt, .text-in, #textForm .btn").forEach((el) => { el.disabled = !open; });
       const pinBtn = app.querySelector("#pinSend");
       if (pinBtn && !open) pinBtn.disabled = true;
       if (!open) setStatus("Responses are closed for this question.", "warn");
-      else if (mine[key] !== undefined) setStatus(SENT[state.question.type], "ok");
+      else if (mine[key] !== undefined) setStatus(SENT[shown.type], "ok");
       else setStatus("");
     }
   </script>
